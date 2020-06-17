@@ -145,8 +145,8 @@ def generate_all_classes(
         if module_name not in cur_package:
             cur_package[module_name] = {}
         cur_package[module_name][module] = code
-    if os.path.exists("__init__.py"):
-        os.unlink("__init__.py")
+    if os.path.exists(os.path.join(out_dir, "__init__.py")):
+        os.unlink(os.path.join(out_dir, "__init__.py"))
     crawl_code_struct(all_code, out_dir)
 
 
