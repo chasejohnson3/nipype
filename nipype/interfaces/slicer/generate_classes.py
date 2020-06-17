@@ -9,13 +9,14 @@ import os
 from shutil import rmtree
 
 import keyword
+import sys
 
 python_keywords = (
     keyword.kwlist
 )  # If c++ SEM module uses one of these key words as a command line parameter, we need to modify variable
 
 
-def force_to_valid_python_variable_name(old_name):
+def force_to_valid_python_variable_name(old_name: str) -> str:
     """  Valid c++ names are not always valid in python, so
     provide alternate naming
 
@@ -27,12 +28,12 @@ def force_to_valid_python_variable_name(old_name):
     new_name = old_name
     new_name = new_name.lstrip().rstrip()
     if old_name in python_keywords:
-        new_name = "opt_" + old_name
+        new_name = f"opt_{old_name}"
     return new_name
 
 
-def add_class_to_package(class_codes, class_names, module_name, package_dir):
-    module_python_filename = os.path.join(package_dir, "%s.py" % module_name)
+def add_class_to_package(class_codes, class_names, module_name: str, package_dir: str) -> None:
+    module_python_filename = os.path.join(package_dir, f"{module_name}.py")
     f_m = open(module_python_filename, "w")
     f_i = open(os.path.join(package_dir, "__init__.py"), "a+")
     f_m.write(
@@ -41,12 +42,12 @@ def add_class_to_package(class_codes, class_names, module_name, package_dir):
 If you spot a bug, please report it on the mailing list and/or change the generator.\"\"\"\n\n"""
     )
     imports = """\
-from ..base import (CommandLine, CommandLineInputSpec, SEMLikeCommandLine, TraitedSpec,
+from nipype.interfaces.base import (CommandLine, CommandLineInputSpec, SEMLikeCommandLine, TraitedSpec,
                     File, Directory, traits, isdefined, InputMultiPath, OutputMultiPath)
 import os\n\n\n"""
     f_m.write(imports)
     f_m.write("\n\n".join(class_codes))
-    f_i.write("from %s import %s\n" % (module_name, ", ".join(class_names)))
+    f_i.write(f"from {module_name} import {', '.join(class_names)}\n")
     f_m.close()
     f_i.close()
 
@@ -71,7 +72,7 @@ def crawl_code_struct(code_struct, package_dir):
                 v = l2
                 subpackages.append(k.lower())
                 f_i = open(os.path.join(package_dir, "__init__.py"), "a+")
-                f_i.write("from %s import *\n" % k.lower())
+                f_i.write(f"from {k.lower()} import *\n")
                 f_i.close()
                 new_pkg_dir = os.path.join(package_dir, k.lower())
                 if os.path.exists(new_pkg_dir):
@@ -108,7 +109,7 @@ if __name__ == '__main__':
                     pkg_name=package_dir.split("/")[-1],
                     sub_pks="\n    ".join(
                         [
-                            "config.add_data_dir('%s')" % sub_pkg
+                            f"config.add_data_dir('{sub_pkg}')"
                             for sub_pkg in subpackages
                         ]
                     ),
@@ -118,19 +119,22 @@ if __name__ == '__main__':
 
 
 def generate_all_classes(
-    modules_list=[], launcher=[], redirect_x=False, mipav_hacks=False
+    xml_dir: str=None, out_dir = os.getcwd(), modules_list=[], launcher=[], redirect_x=False, mipav_hacks=False
 ):
     """ modules_list contains all the SEM compliant tools that should have wrappers created for them.
         launcher containtains the command line prefix wrapper arugments needed to prepare
         a proper environment for each of the modules.
     """
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
     all_code = {}
     for module in modules_list:
         print("=" * 80)
         print("Generating Definition for module {0}".format(module))
         print("^" * 80)
         package, code, module = generate_class(
-            module, launcher, redirect_x=redirect_x, mipav_hacks=mipav_hacks
+            module, launcher, xml_dir=xml_dir, redirect_x=redirect_x, mipav_hacks=mipav_hacks
         )
         cur_package = all_code
         module_name = package.strip().split(" ")[0].split(".")[-1]
@@ -143,13 +147,13 @@ def generate_all_classes(
         cur_package[module_name][module] = code
     if os.path.exists("__init__.py"):
         os.unlink("__init__.py")
-    crawl_code_struct(all_code, os.getcwd())
+    crawl_code_struct(all_code, out_dir)
 
 
 def generate_class(
-    module, launcher, strip_module_name_prefix=True, redirect_x=False, mipav_hacks=False
+    module, launcher, xml_dir: str = None, strip_module_name_prefix=True, redirect_x=False, mipav_hacks=False
 ):
-    dom = grab_xml(module, launcher, mipav_hacks=mipav_hacks)
+    dom = grab_xml(module, launcher, mipav_hacks=mipav_hacks, xml_dir=xml_dir)
     if strip_module_name_prefix:
         module_name = module.split(".")[-1]
     else:
@@ -239,6 +243,8 @@ def generate_class(
                 "point": "%s",
                 "region": "%s",
                 "geometry": "%s",
+                "pointfile": "%s",
+                "measurement": "%s", # cjohnson30
             }
 
             if param.nodeName.endswith("-vector"):
@@ -270,6 +276,8 @@ def generate_class(
                 "table": "File",
                 "point": "traits.List",
                 "region": "traits.List",
+                "pointfile": "File",
+                "measurement": "traits.List" # cjohnson30
             }
 
             if param.nodeName.endswith("-enumeration"):
@@ -444,44 +452,50 @@ def generate_class(
     return category, input_spec_code + output_spec_code + main_class, module_name
 
 
-def grab_xml(module, launcher, mipav_hacks=False):
+def grab_xml(module, launcher, xml_dir: str =None, mipav_hacks=False):
     #        cmd = CommandLine(command = "Slicer3", args="--launch %s --xml"%module)
     #        ret = cmd.run()
-    command_list = launcher[:]  # force copy to preserve original
-    command_list.extend([module, "--xml"])
-    final_command = " ".join(command_list)
-    xmlReturnValue = subprocess.Popen(
-        final_command, stdout=subprocess.PIPE, shell=True
-    ).communicate()[0]
-    if mipav_hacks:
-        # workaround for a jist bug https://www.nitrc.org/tracker/index.php?func=detail&aid=7234&group_id=228&atid=942
-        new_xml = ""
-        replace_closing_tag = False
-        for line in xmlReturnValue.splitlines():
-            if line.strip() == "<file collection: semi-colon delimited list>":
-                new_xml += "<file-vector>\n"
-                replace_closing_tag = True
-            elif replace_closing_tag and line.strip() == "</file>":
-                new_xml += "</file-vector>\n"
-                replace_closing_tag = False
-            else:
-                new_xml += line + "\n"
-
-        xmlReturnValue = new_xml
-
-        # workaround for a JIST bug https://www.nitrc.org/tracker/index.php?func=detail&aid=7233&group_id=228&atid=942
-        if xmlReturnValue.strip().endswith("XML"):
-            xmlReturnValue = xmlReturnValue.strip()[:-3]
-        if xmlReturnValue.strip().startswith("Error: Unable to set default atlas"):
-            xmlReturnValue = xmlReturnValue.strip()[
-                len("Error: Unable to set default atlas") :
-            ]
-    try:
-        dom = xml.dom.minidom.parseString(xmlReturnValue.strip())
-    except Exception as e:
-        print(xmlReturnValue.strip())
-        raise e
-    return dom
+    if xml_dir is None:
+        command_list = launcher[:]  # force copy to preserve original
+        command_list.extend([module, "--xml"])
+        final_command = " ".join(command_list)
+        xmlReturnValue = subprocess.Popen(
+            final_command, stdout=subprocess.PIPE, shell=True
+        ).communicate()[0]
+        if mipav_hacks:
+            # workaround for a jist bug https://www.nitrc.org/tracker/index.php?func=detail&aid=7234&group_id=228&atid=942
+            new_xml = ""
+            replace_closing_tag = False
+            for line in xmlReturnValue.splitlines():
+                if line.strip() == "<file collection: semi-colon delimited list>":
+                    new_xml += "<file-vector>\n"
+                    replace_closing_tag = True
+                elif replace_closing_tag and line.strip() == "</file>":
+                    new_xml += "</file-vector>\n"
+                    replace_closing_tag = False
+                else:
+                    new_xml += line + "\n"
+                xmlReturnValue = new_xml
+            # workaround for a JIST bug https://www.nitrc.org/tracker/index.php?func=detail&aid=7233&group_id=228&atid=942
+            if xmlReturnValue.strip().endswith("XML"):
+                xmlReturnValue = xmlReturnValue.strip()[:-3]
+            if xmlReturnValue.strip().startswith("Error: Unable to set default atlas"):
+                xmlReturnValue = xmlReturnValue.strip()[
+                    len("Error: Unable to set default atlas") :
+                ]
+        try:
+            dom = xml.dom.minidom.parseString(xmlReturnValue.strip())
+        except Exception as e:
+            print(xmlReturnValue.strip())
+            raise e
+        return dom
+    else:
+        try:
+            dom = xml.dom.minidom.parse(os.path.join(xml_dir, f"{module}.xml"))
+        except Exception as e:
+            print(os.path.join(xml_dir, f"{module}.xml"))
+            raise e
+        return dom
 
 
 #        if ret.runtime.returncode == 0:
@@ -524,6 +538,7 @@ def gen_filename_from_param(param, base):
             "file": "",
             "directory": "",
             "geometry": ".vtk",
+            "table": ".csv", # cjohnson30
         }[param.nodeName]
     return base + ext
 
@@ -533,72 +548,128 @@ if __name__ == "__main__":
     # every tool in the modules list must be found on the default path
     # AND calling the module with --xml must be supported and compliant.
     modules_list = [
-        "MedianImageFilter",
-        "CheckerBoardFilter",
-        "EMSegmentCommandLine",
-        "GrayscaleFillHoleImageFilter",
-        # 'CreateDICOMSeries', #missing channel
-        "TractographyLabelMapSeeding",
-        "IntensityDifferenceMetric",
-        "DWIToDTIEstimation",
-        "MaskScalarVolume",
-        "ImageLabelCombine",
-        "DTIimport",
-        "OtsuThresholdImageFilter",
-        "ExpertAutomatedRegistration",
-        "ThresholdScalarVolume",
-        "DWIUnbiasedNonLocalMeansFilter",
+        "ACPCTransform",
+        "AddScalarVolumes",
+        "BRAINSABC",
+        "BRAINSAlignMSP",
+        "BRAINSCleanMask",
+        "BRAINSClipInferior",
+        "BRAINSConstellationDetector",
+        "BRAINSConstellationDetectorGUI",
+        "BRAINSConstellationLandmarksTransform",
+        "BRAINSConstellationModeler",
+        "BRAINSCreateLabelMapFromProbabilityMaps",
+        "BRAINSDWICleanup",
+        "BRAINSEyeDetector",
         "BRAINSFit",
-        "MergeModels",
-        "ResampleDTIVolume",
-        "MultiplyScalarVolumes",
-        "LabelMapSmoothing",
-        "RigidRegistration",
-        "VotingBinaryHoleFillingImageFilter",
+        "BRAINSInitializedControlPoints",
+        "BRAINSLabelStats",
+        "BRAINSLandmarkInitializer",
+        "BRAINSLinearModelerEPCA",
+        "BRAINSLmkTransform",
+        "BRAINSMultiModeSegment",
+        "BRAINSMultiSTAPLE",
+        "BRAINSMush",
+        "BRAINSPosteriorToContinuousClass",
         "BRAINSROIAuto",
-        "RobustStatisticsSegmenter",
-        "GradientAnisotropicDiffusion",
-        "ProbeVolumeWithModel",
-        "ModelMaker",
-        "ExtractSkeleton",
-        "GrayscaleGrindPeakImageFilter",
-        "N4ITKBiasFieldCorrection",
         "BRAINSResample",
-        "DTIexport",
-        "VBRAINSDemonWarp",
+        "BRAINSResize",
+        "BRAINSSnapShotWriter",
+        "BRAINSStripRotation",
+        "BRAINSTalairach",
+        "BRAINSTalairachMask",
+        "BRAINSTransformConvert",
+        "BRAINSTransformFromFiducials",
+        "BRAINSTrimForegroundInDirection",
+        "BinaryMaskEditorBasedOnLandmarks",
+        "CLIROITest",
+        "CastScalarVolume",
+        "CheckerBoardFilter",
+        "ComputeReflectiveCorrelationMetric",
+        "CreateDICOMSeries",
+        "CurvatureAnisotropicDiffusion",
+        "DWICompare",
+        "DWIConvert",
+        "DWISimpleCompare",
+        "DiffusionTensorTest",
+        "ESLR",
+        "ExecutionModelTour",
+        "ExpertAutomatedRegistration",
+        "ExtractSkeleton",
+        "FiducialRegistration",
+        "FindCenterOfBrain",
+        "GaussianBlurImageFilter",
+        "GenerateAverageLmkFile",
+        "GenerateEdgeMapImage",
+        "GenerateLabelMapFromProbabilityMap",
+        "GeneratePurePlugMask",
+        "GradientAnisotropicDiffusion",
+        "GrayscaleFillHoleImageFilter",
+        "GrayscaleGrindPeakImageFilter",
+        "GrayscaleModelMaker",
+        "HistogramMatching",
+        "ImageLabelCombine",
+        "LabelMapSmoothing",
+        "LandmarksCompare",
+        "MaskScalarVolume",
+        "MedianImageFilter",
+        "MergeModels",
+        "ModelMaker",
+        "ModelToLabelMap",
+        "MultiplyScalarVolumes",
+        "N4ITKBiasFieldCorrection",
+        "OrientScalarVolume",
+        "PETStandardUptakeValueComputation",
+        "PerformMetricTest",
+        "ProbeVolumeWithModel",
+        "ResampleDTIVolume",
         "ResampleScalarVectorDWIVolume",
         "ResampleScalarVolume",
-        "OtsuThresholdSegmentation",
-        # 'ExecutionModelTour',
-        "HistogramMatching",
-        "BRAINSDemonWarp",
-        "ModelToLabelMap",
-        "GaussianBlurImageFilter",
-        "DiffusionWeightedVolumeMasking",
-        "GrayscaleModelMaker",
-        "CastScalarVolume",
-        "DicomToNrrdConverter",
-        "AffineRegistration",
-        "AddScalarVolumes",
-        "LinearRegistration",
+        "RobustStatisticsSegmenter",
         "SimpleRegionGrowingSegmentation",
-        "DWIJointRicianLMMSEFilter",
-        "MultiResolutionAffineRegistration",
         "SubtractScalarVolumes",
-        "DWIRicianLMMSEFilter",
-        "OrientScalarVolume",
-        "FiducialRegistration",
-        "BSplineDeformableRegistration",
-        "CurvatureAnisotropicDiffusion",
-        "PETStandardUptakeValueComputation",
-        "DiffusionTensorScalarMeasurements",
-        "ACPCTransform",
-        "EMSegmentTransformToNewFormat",
-        "BSplineToDeformationField",
+        "TestGridTransformRegistration",
+        "ThresholdScalarVolume",
+        "VotingBinaryHoleFillingImageFilter",
+        "compareTractInclusion",
+        "extractNrrdVectorIndex",
+        "fcsv_to_hdf5",
+        "gtractAnisotropyMap",
+        "gtractAverageBvalues",
+        "gtractClipAnisotropy",
+        "gtractCoRegAnatomy",
+        "gtractCoRegAnatomyBspline",
+        "gtractCoRegAnatomyRigid",
+        "gtractConcatDwi",
+        "gtractCopyImageOrientation",
+        "gtractCoregBvalues",
+        "gtractCostFastMarching",
+        "gtractCreateGuideFiber",
+        "gtractFastMarchingTracking",
+        "gtractFiberTracking",
+        "gtractFreeTracking",
+        "gtractGraphSearchTracking",
+        "gtractGuidedTracking",
+        "gtractImageConformity",
+        "gtractInvertBSplineTransform",
+        "gtractInvertDisplacementField",
+        "gtractInvertRigidTransform",
+        "gtractResampleAnisotropy",
+        "gtractResampleB0",
+        "gtractResampleCodeImage",
+        "gtractResampleDWIInPlace",
+        "gtractResampleFibers",
+        "gtractStreamlineTracking",
+        "gtractTensor",
+        "gtractTransformToDisplacementField",
+        "insertMidACPCpoint",
+        "landmarksConstellationAligner",
+        "landmarksConstellationWeights",
+        "simpleEM",
     ]
 
     # SlicerExecutionModel compliant tools that are usually statically built, and don't need the Slicer3 --launcher
-    generate_all_classes(modules_list=modules_list, launcher=[])
+    generate_all_classes(xml_dir=sys.argv[1], out_dir=sys.argv[2], modules_list=modules_list, launcher=[])
     # Tools compliant with SlicerExecutionModel called from the Slicer environment (for shared lib compatibility)
     # launcher = ['/home/raid3/gorgolewski/software/slicer/Slicer', '--launch']
     # generate_all_classes(modules_list=modules_list, launcher=launcher)
